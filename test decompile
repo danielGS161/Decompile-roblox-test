@@ -1,0 +1,136 @@
+--[[
+Descompilador Melhorado para Roblox
+Criado com melhorias de robustez, verificações adicionais e otimização de recursos.
+]]
+
+-- Verifica se o ambiente suporta as funções de depuração necessárias
+if not debug.getupvalues or not debug.getprotos or not debug.getconstants then
+    error("Este ambiente não suporta as funções de depuração necessárias.")
+end
+
+local Numbers = {}
+local Properties = {}
+local HttpService = game:GetService("HttpService")
+
+-- Função auxiliar para formatar chaves de tabelas
+local function keyF(a)
+    return typeof(a) == "number" and ("[%d] = "):format(a) or ("['%s'] = "):format(tostring(a))
+end
+
+-- Função para criar identificadores únicos baseados no tipo do valor
+local function keyE(a, b)
+    local typeMap = {
+        instance = function(b) return b.Name:gsub(" ", "_") end,
+        boolean = function() return "bool" .. tostring(a) end,
+        string = function() return "str" .. tostring(a) end,
+        number = function() return "num" .. tostring(a) end,
+        table = function() return "tbl" .. tostring(a) end
+    }
+    return typeMap[typeof(b):lower()] and typeMap[typeof(b):lower()](b) or (typeof(b) .. tostring(a))
+end
+
+-- Função para gerar números aleatórios únicos
+local function rnum(min, max)
+    if #Numbers >= (max - min + 1) then
+        error("Não há números disponíveis no intervalo fornecido.")
+    end
+    local a
+    repeat a = math.random(min, max) until not table.find(Numbers, a)
+    table.insert(Numbers, a)
+    return a
+end
+
+-- Obtém o ambiente global
+local _RENV = getrenv()
+
+-- Verifica se uma função está no ambiente global
+local function inrenv(func)
+    local name = typeof(func) == "string" and func or (typeof(func) == "function" and debug.getinfo(func).name)
+    for i, v in _RENV do
+        if typeof(v) == "function" and i == name then return true end
+    end
+    return false
+end
+
+-- Formata instâncias para nomes completos
+local function GetFullName(instance)
+    local path = {}
+    while instance ~= game and instance.Parent do
+        table.insert(path, instance)
+        instance = instance.Parent
+    end
+    if #path == 0 then return "nil --[[ PARENTED TO NIL OR DESTROYED ]]" end
+    local fullName = (path[#path].ClassName ~= "Workspace" and ('game:GetService("%s")'):format(path[#path].ClassName) or "workspace")
+    for i = #path - 1, 1, -1 do
+        fullName = fullName .. (":FindFirstChild(\"%s\")"):format(path[i].Name)
+    end
+    return fullName
+end
+
+-- Loop recursivo para processar tabelas
+local function tableloop(tbl, indent, equal, meta)
+    meta = meta or 0
+    indent = indent or 0
+    local result = (not equal and string.rep("  ", indent) or "") .. "{"
+    if typeof(tbl) ~= "table" then return HandleDatatype(tbl, indent) end
+    local depthLimit = 10
+    if meta > depthLimit then
+        return "--[[ Metatable muito profunda para descompilar ]]"
+    end
+    for key, value in pairs(tbl) do
+        if typeof(value) == "table" then
+            if getmetatable(value) then
+                result = result .. "\n" .. string.rep("  ", indent) .. "local meta" .. meta .. " = " .. tableloop(getmetatable(value), indent + 1, true, meta + 1)
+            else
+                result = result .. "\n" .. string.rep("  ", indent + 1) .. keyF(key) .. tableloop(value, indent + 1, true, meta)
+            end
+        else
+            result = result .. "\n" .. string.rep("  ", indent + 1) .. keyF(key) .. HandleDatatype(value, indent + 1, keyE(key, value)) .. ";"
+        end
+    end
+    return result .. "\n" .. string.rep("  ", indent) .. "}"
+end
+
+-- Constrói representações de tipos de dados específicos
+local function HandleDatatype(data, indent, identifier)
+    local constructors = {
+        string = function(d) return ('"%s"'):format(d) end,
+        table = function(d) return tableloop(d, indent and indent + 1 or 1, identifier and true or false) end,
+        number = tostring,
+        Vector3 = function(d) return ("Vector3.new(%f, %f, %f)"):format(d.X, d.Y, d.Z) end,
+        Vector2 = function(d) return ("Vector2.new(%f, %f)"):format(d.X, d.Y) end,
+        CFrame = function(d) return ("CFrame.new(%s)"):format(table.concat({d:GetComponents()}, ", ")) end,
+        Color3 = function(d) return ("Color3.fromRGB(%d, %d, %d)"):format(d.R * 255, d.G * 255, d.B * 255) end,
+        Instance = GetFullName,
+        boolean = tostring
+    }
+    return constructors[typeof(data)] and constructors[typeof(data)](data) or "--[[ Tipo não suportado: " .. typeof(data) .. " ]]"
+end
+
+-- Descompila uma função
+local function DecompileFunction(TargetFunc, indent, IsProto, ExcludeName)
+    indent = indent or 0
+    local info = debug.getinfo(TargetFunc)
+    local paramCount = info.numparams
+    local vararg = info.is_vararg
+    local args = "(" .. table.concat({unpack({"a", "b", "c", "d", "e"}, 1, paramCount)}) .. (vararg and "..." or "") .. ")"
+    local funcBody = string.rep("  ", indent) .. "function " .. (ExcludeName and "" or (info.name or "unknown")) .. args .. "\n"
+    local _, upvalues = pcall(debug.getupvalues, TargetFunc)
+    funcBody = funcBody .. string.rep("  ", indent + 1) .. "local upvalues = " .. tableloop(upvalues or {}, indent + 1) .. "\n"
+    return funcBody .. string.rep("  ", indent) .. "end"
+end
+
+-- Descompila um script inteiro
+local function DecompileScript(Script, indent)
+    indent = indent or 0
+    local code = "--[[ Script descompilado ]]\nlocal script = " .. GetFullName(Script) .. "\n"
+    for _, func in ipairs(getgc(true)) do
+        if typeof(func) == "function" and islclosure(func) and getfenv(func).script == Script then
+            code = code .. DecompileFunction(func, indent) .. "\n"
+        end
+    end
+    return code
+end
+
+getgenv().DecompileScript = DecompileScript
+return DecompileScript
